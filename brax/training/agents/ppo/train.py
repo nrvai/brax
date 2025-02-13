@@ -30,7 +30,7 @@ from brax.training.agents.ppo import losses as ppo_losses
 from brax.training.agents.ppo import networks as ppo_networks
 from brax.v1 import envs as envs_v1
 
-from nrv_lab.train.evaluator import Evaluator, generate_unroll
+from brax.training.acting import Evaluator, generate_unroll
 
 
 @flax.struct.dataclass

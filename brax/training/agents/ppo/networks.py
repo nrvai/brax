@@ -28,6 +28,7 @@ from flax import linen
 class PPONetworks:
   policy_network: networks.FeedForwardNetwork
   value_network: networks.FeedForwardNetwork
+  encoder_network: networks.FeedForwardNetwork
   parametric_action_distribution: distribution.ParametricDistribution
 
 
@@ -43,8 +44,9 @@ def make_inference_fn(ppo_networks: PPONetworks):
     def policy(
         observations: types.Observation, key_sample: PRNGKey
     ) -> Tuple[types.Action, types.Extra]:
+      obs, priv = observations
       param_subset = (params[0], params[1])  # normalizer and policy params
-      logits = policy_network.apply(*param_subset, observations)
+      logits = policy_network.apply(*param_subset, obs)
       if deterministic:
         return ppo_networks.parametric_action_distribution.mode(logits), {}
       raw_actions = parametric_action_distribution.sample_no_postprocessing(
@@ -66,13 +68,16 @@ def make_inference_fn(ppo_networks: PPONetworks):
 
 def make_ppo_networks(
     observation_size: types.ObservationSize,
+    privileged_size: int,
     action_size: int,
     preprocess_observations_fn: types.PreprocessObservationFn = types.identity_observation_preprocessor,
     policy_hidden_layer_sizes: Sequence[int] = (32,) * 4,
     value_hidden_layer_sizes: Sequence[int] = (256,) * 5,
+    encoder_hidden_layer_sizes: Sequence[int] = (256,) * 3,
     activation: networks.ActivationFn = linen.swish,
     policy_obs_key: str = 'state',
     value_obs_key: str = 'state',
+    encoder_obs_key: str = 'state',
 ) -> PPONetworks:
   """Make PPO networks with preprocessor."""
   parametric_action_distribution = distribution.NormalTanhDistribution(
@@ -93,9 +98,17 @@ def make_ppo_networks(
       activation=activation,
       obs_key=value_obs_key,
   )
+  encoder_network = networks.make_value_network(
+      privileged_size,
+      preprocess_observations_fn=preprocess_observations_fn,
+      hidden_layer_sizes=encoder_hidden_layer_sizes,
+      activation=activation,
+      obs_key=encoder_obs_key,
+  )
 
   return PPONetworks(
       policy_network=policy_network,
       value_network=value_network,
+      encoder_network=encoder_network,
       parametric_action_distribution=parametric_action_distribution,
   )
