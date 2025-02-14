@@ -36,11 +36,12 @@ def actor_step(
     extra_fields: Sequence[str] = ()
 ) -> Tuple[State, Transition]:
     """Collect data."""
-    actions, policy_extras = policy(env_state.obs, key)
+    actions, policy_extras = policy(env_state.obs, env_state.priv, key)
     nstate = env.step(env_state, actions)
     state_extras = {x: nstate.info[x] for x in extra_fields}
     return nstate, Transition(  # pytype: disable=wrong-arg-types  # jax-ndarray
         observation=env_state.obs,
+        priv=env_state.priv,
         action=actions,
         reward=nstate.reward,
         discount=1 - nstate.done,
@@ -78,9 +79,10 @@ def generate_unroll(
 class Evaluator:
     """Class to run evaluations."""
 
-    def __init__(self, eval_env: envs.Env,
-                 eval_policy_fn: Callable[[PolicyParams],
-                                          Policy], num_eval_envs: int,
+    def __init__(self,
+                 eval_env: envs.Env,
+                 eval_policy_fn: Callable[[PolicyParams], Policy],
+                 num_eval_envs: int,
                  episode_length: int, action_repeat: int, key: PRNGKey):
         """Init.
 
@@ -98,6 +100,7 @@ class Evaluator:
         eval_env = envs.training.EvalWrapper(eval_env)
 
         def generate_eval_unroll(policy_params: PolicyParams,
+                                 enc_params: PolicyParams,
                                  key: PRNGKey) -> State:
             reset_keys = jax.random.split(key, num_eval_envs)
             eval_first_state = eval_env.reset(reset_keys)
@@ -105,7 +108,7 @@ class Evaluator:
             return generate_unroll(
                 eval_env,
                 eval_first_state,
-                eval_policy_fn(policy_params),
+                eval_policy_fn(policy_params, enc_params),
                 key,
                 unroll_length=episode_length // action_repeat)[0]
 
@@ -114,13 +117,14 @@ class Evaluator:
 
     def run_evaluation(self,
                        policy_params: PolicyParams,
+                       enc_params: PolicyParams,
                        training_metrics: Metrics,
                        aggregate_episodes: bool = True) -> Metrics:
         """Run one epoch of evaluation."""
         self._key, unroll_key = jax.random.split(self._key)
 
         t = time.time()
-        eval_state = self._generate_eval_unroll(policy_params, unroll_key)
+        eval_state = self._generate_eval_unroll(policy_params, enc_params, unroll_key)
         eval_metrics = eval_state.info['eval_metrics']
         eval_metrics.active_episodes.block_until_ready()
         epoch_eval_time = time.time() - t

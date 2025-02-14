@@ -31,6 +31,7 @@ import jax.numpy as jnp
 class PPONetworkParams:
   """Contains training state for the learner."""
 
+  encoder: Params
   policy: Params
   value: Params
 
@@ -104,6 +105,8 @@ def compute_gae(
 def compute_ppo_loss(
     params: PPONetworkParams,
     normalizer_params: Any,
+    enc_params: Any,
+    enc_normalizer_params: Any,
     data: types.Transition,
     rng: jnp.ndarray,
     ppo_network: ppo_networks.PPONetworks,
@@ -137,12 +140,14 @@ def compute_ppo_loss(
   parametric_action_distribution = ppo_network.parametric_action_distribution
   policy_apply = ppo_network.policy_network.apply
   value_apply = ppo_network.value_network.apply
+  encoder_apply = ppo_network.encoder_network.apply
 
   # Put the time dimension first.
   data = jax.tree_util.tree_map(lambda x: jnp.swapaxes(x, 0, 1), data)
-  policy_logits = policy_apply(
-      normalizer_params, params.policy, data.observation
-  )
+
+  encoding = encoder_apply(enc_normalizer_params, enc_params, data.priv)
+
+  policy_logits = policy_apply(normalizer_params, params.policy, jnp.concatenate([data.observation, encoding], axis=-1))
 
   baseline = value_apply(normalizer_params, params.value, data.observation)
   terminal_obs = jax.tree_util.tree_map(lambda x: x[-1], data.next_observation)

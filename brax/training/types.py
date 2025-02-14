@@ -44,6 +44,7 @@ class Transition(NamedTuple):
   """Container for a transition."""
 
   observation: NestedArray
+  priv: NestedArray
   action: NestedArray
   reward: NestedArray
   discount: NestedArray
