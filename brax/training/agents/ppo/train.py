@@ -98,6 +98,7 @@ def ppo_train(
     def init_training_components():
         ppo_network = ppo_networks.make_ppo_networks(
             state.obs.shape[-1],
+            state.priv.shape[-1],
             env.action_size,
             policy_hidden_layer_sizes=policy_hidden_layer_sizes,
             preprocess_observations_fn=running_statistics.normalize)

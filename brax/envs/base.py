@@ -38,6 +38,7 @@ class State(base.Base):
 
   pipeline_state: Optional[base.State]
   obs: Observation
+  priv: Observation
   reward: jax.Array
   done: jax.Array
   metrics: Dict[str, jax.Array] = struct.field(default_factory=dict)
