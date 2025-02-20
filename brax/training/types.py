@@ -49,6 +49,7 @@ class Transition(NamedTuple):
   reward: NestedArray
   discount: NestedArray
   next_observation: NestedArray
+  next_priv: NestedArray
   extras: NestedArray = ()  # pytype: disable=annotation-type-mismatch  # jax-ndarray
 
 

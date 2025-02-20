@@ -105,7 +105,6 @@ def compute_gae(
 def compute_ppo_loss(
     params: PPONetworkParams,
     normalizer_params: Any,
-    enc_params: Any,
     enc_normalizer_params: Any,
     data: types.Transition,
     rng: jnp.ndarray,
@@ -145,13 +144,21 @@ def compute_ppo_loss(
   # Put the time dimension first.
   data = jax.tree_util.tree_map(lambda x: jnp.swapaxes(x, 0, 1), data)
 
-  encoding = encoder_apply(enc_normalizer_params, enc_params, data.priv)
+  encoding = encoder_apply(enc_normalizer_params, params.encoder, data.priv)
+  pinput = jnp.concatenate([data.observation, encoding], axis=-1)
+  #encoding = encoding.reshape((encoding.shape[0], -1))
+  #obs = data.observation.reshape((data.observation.shape[0], -1))
 
-  policy_logits = policy_apply(normalizer_params, params.policy, jnp.concatenate([data.observation, encoding], axis=-1))
+  policy_logits = policy_apply(normalizer_params, params.policy, pinput)
 
-  baseline = value_apply(normalizer_params, params.value, data.observation)
+  baseline = value_apply(normalizer_params, params.value, pinput)
   terminal_obs = jax.tree_util.tree_map(lambda x: x[-1], data.next_observation)
-  bootstrap_value = value_apply(normalizer_params, params.value, terminal_obs)
+  next_priv = jax.tree_util.tree_map(lambda x: x[-1], data.next_priv)
+
+  next_encoding = encoder_apply(enc_normalizer_params, params.encoder, next_priv)
+
+  next_pinput = jnp.concatenate([terminal_obs, next_encoding], axis=-1)
+  bootstrap_value = value_apply(normalizer_params, params.value, next_pinput)
 
   rewards = data.reward * reward_scaling
   truncation = data.extras['state_extras']['truncation']

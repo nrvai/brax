@@ -1,4 +1,3 @@
-
 # Copyright 2024 The Brax Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -39,7 +38,6 @@ class TrainingState:
     optimizer_state: optax.OptState
     params: ppo_losses.PPONetworkParams
     normalizer_params: running_statistics.RunningStatisticsState
-    enc_params: ppo_losses.PPONetworkParams
     enc_normalizer_params: running_statistics.RunningStatisticsState
     env_steps: jnp.ndarray
 
@@ -59,9 +57,10 @@ class DomainRandomizationWrapper(Wrapper):
         key, sub_key = jax.random.split(self.key, 2)
         self.key = key
 
-        hf_max_scale = jax.lax.cond(state.info["curriculum"] == 1, lambda: 4, lambda: 2)
-        hf_max_scale = jax.lax.cond(state.info["curriculum"] == 2, lambda: 8, lambda: hf_max_scale)
-        hf_max_scale = jax.lax.cond(state.info["curriculum"] > 2, lambda: 10, lambda: hf_max_scale)
+        hf_max_scale = jax.lax.cond(state.info["curriculum"] == 1, lambda: 1, lambda: 0)
+        hf_max_scale = jax.lax.cond(state.info["curriculum"] == 2, lambda: 2, lambda: hf_max_scale)
+        hf_max_scale = jax.lax.cond(state.info["curriculum"] == 3, lambda: 5, lambda: hf_max_scale)
+        hf_max_scale = jax.lax.cond(state.info["curriculum"] > 3, lambda: 10, lambda: hf_max_scale)
         hf_scale = jax.random.randint(sub_key, (1,), 0, hf_max_scale + 1)[0] / 10.0
 
         new_sys = sys.replace(hfield_data=sys.hfield_data * hf_scale)
@@ -128,7 +127,7 @@ def ppo_train(
         else:
             policy_params = ppo_network.policy_network.init(key_policy)
             value_params = ppo_network.value_network.init(key_value)
-            normalizer_params = running_statistics.init_state(specs.Array(state.obs.shape[-1:], jnp.dtype("float32")))
+            normalizer_params = running_statistics.init_state(specs.Array((state.obs.shape[-1] + 128), jnp.dtype("float32")))
             enc_params = ppo_network.encoder_network.init(key_enc)
             enc_normalizer_params = running_statistics.init_state(specs.Array(state.priv.shape[-1:], jnp.dtype("float32")))
 
@@ -139,7 +138,6 @@ def ppo_train(
             optimizer_state=optimizer_params,
             params=init_params,
             normalizer_params=normalizer_params,
-            enc_params=enc_params,
             enc_normalizer_params=enc_normalizer_params,
             env_steps=0
         )
@@ -152,25 +150,24 @@ def ppo_train(
                        normalizer_params: running_statistics.RunningStatisticsState,
                        enc_normalizer_params: running_statistics.RunningStatisticsState
                        ):
-        optimizer_state, params, enc_params, key = carry
+        optimizer_state, params, key = carry
         key, key_loss = jax.random.split(key)
         (_, metrics), params, optimizer_state = gradient_update_fn(
             params,
             normalizer_params,
-            enc_params,
             enc_normalizer_params,
             data,
             key_loss,
             optimizer_state=optimizer_state
         )
 
-        return (optimizer_state, params, enc_params, key), metrics
+        return (optimizer_state, params, key), metrics
 
     def sgd_step(carry, _, data: types.Transition,
                  normalizer_params: running_statistics.RunningStatisticsState,
                  enc_normalizer_params: running_statistics.RunningStatisticsState
                  ):
-        optimizer_state, params, enc_params, key = carry
+        optimizer_state, params, key = carry
         key, key_perm, key_grad = jax.random.split(key, 3)
 
         def shuffle(x: jnp.ndarray):
@@ -179,19 +176,21 @@ def ppo_train(
             return x
 
         shuffled_data = jax.tree_util.tree_map(shuffle, data)
-        (optimizer_state, params, enc_params, _), metrics = jax.lax.scan(
+        (optimizer_state, params, _), metrics = jax.lax.scan(
             functools.partial(minibatch_step, normalizer_params=normalizer_params, enc_normalizer_params=enc_normalizer_params),
-            (optimizer_state, params, enc_params, key_grad),
+            (optimizer_state, params, key_grad),
             shuffled_data,
             length=num_minibatches
         )
-        return (optimizer_state, params, enc_params, key), metrics
+        return (optimizer_state, params, key), metrics
 
     def training_step(carry, _):
         training_state, state, key = carry
         key, key_loss, key_generate_unroll = jax.random.split(key, 3)
 
-        policy = make_policy((training_state.normalizer_params, training_state.params.policy), (training_state.enc_normalizer_params, training_state.enc_params))
+        params = (training_state.normalizer_params, training_state.params.policy)
+        enc_params = (training_state.enc_normalizer_params, training_state.params.encoder)
+        policy = make_policy(params, enc_params)
 
         def unroll(carry, _):
             state, key = carry
@@ -216,16 +215,18 @@ def ppo_train(
 
         normalizer_params = running_statistics.update(
             training_state.normalizer_params,
-            data.observation)
+            data.extras["policy_extras"]["encoding"]
+            # jnp.concatenate([data.observation, data.extras["policy_extras"]["encoding"]], axis=-1)
+        )
 
         enc_normalizer_params = running_statistics.update(
             training_state.enc_normalizer_params,
             data.priv)
 
-        (optimizer_state, params, enc_params, _), metrics = jax.lax.scan(
+        (optimizer_state, params, _), metrics = jax.lax.scan(
             functools.partial(
                 sgd_step, data=data, normalizer_params=normalizer_params, enc_normalizer_params=enc_normalizer_params),
-            (training_state.optimizer_state, training_state.params, training_state.enc_params, key_loss), (),
+            (training_state.optimizer_state, training_state.params, key_loss), (),
             length=num_updates_per_batch
         )
 
@@ -233,7 +234,6 @@ def ppo_train(
             optimizer_state=optimizer_state,
             params=params,
             normalizer_params=normalizer_params,
-            enc_params=enc_params,
             enc_normalizer_params=enc_normalizer_params,
             env_steps=training_state.env_steps + env_steps_per_training_step
         )
@@ -298,7 +298,7 @@ def ppo_train(
         current_step = int(training_state.env_steps)
 
         params = (training_state.normalizer_params, training_state.params.policy)
-        params = (training_state.enc_normalizer_params, training_state.params.encoder)
+        enc_params = (training_state.enc_normalizer_params, training_state.params.encoder)
         metrics = evaluator.run_evaluation(params, enc_params, train_metrics)
 
         progress_fn(current_step, metrics, make_policy, training_state, curriculum)

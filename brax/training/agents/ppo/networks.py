@@ -42,7 +42,7 @@ def make_inference_fn(ppo_networks: PPONetworks):
       deterministic: bool = False
   ) -> types.Policy:
     policy_network = ppo_networks.policy_network
-    encoder_network = ppo_networks.policy_network
+    encoder_network = ppo_networks.encoder_network
     parametric_action_distribution = ppo_networks.parametric_action_distribution
 
     def policy(
@@ -50,7 +50,9 @@ def make_inference_fn(ppo_networks: PPONetworks):
     ) -> Tuple[types.Action, types.Extra]:
       encoding = encoder_network.apply(*enc_params, priv)
 
-      logits = policy_network.apply(*policy_params, jp.concatenate([observations, encoding], axis=-1))
+      pinput = jp.concatenate([observations, encoding], axis=-1)
+      logits = policy_network.apply(*policy_params, pinput)
+
       if deterministic:
         return ppo_networks.parametric_action_distribution.mode(logits), {}
       raw_actions = parametric_action_distribution.sample_no_postprocessing(
@@ -63,6 +65,7 @@ def make_inference_fn(ppo_networks: PPONetworks):
       return postprocessed_actions, {
           'log_prob': log_prob,
           'raw_action': raw_actions,
+          'encoding': pinput
       }
 
     return policy
@@ -77,7 +80,7 @@ def make_ppo_networks(
     preprocess_observations_fn: types.PreprocessObservationFn = types.identity_observation_preprocessor,
     policy_hidden_layer_sizes: Sequence[int] = (32,) * 4,
     value_hidden_layer_sizes: Sequence[int] = (256,) * 5,
-    encoder_hidden_layer_sizes: Sequence[int] = (256,) * 3,
+    encoder_hidden_layer_sizes: Sequence[int] = (512, 512),
     activation: networks.ActivationFn = linen.swish,
     policy_obs_key: str = 'state',
     value_obs_key: str = 'state',
@@ -87,22 +90,25 @@ def make_ppo_networks(
   parametric_action_distribution = distribution.NormalTanhDistribution(
       event_size=action_size
   )
+  encoder_size = 128
+  full_obs_size = observation_size + encoder_size
   policy_network = networks.make_policy_network(
       parametric_action_distribution.param_size,
-      observation_size,
+      full_obs_size,
       preprocess_observations_fn=preprocess_observations_fn,
       hidden_layer_sizes=policy_hidden_layer_sizes,
       activation=activation,
       obs_key=policy_obs_key,
   )
   value_network = networks.make_value_network(
-      observation_size,
+      full_obs_size,
       preprocess_observations_fn=preprocess_observations_fn,
       hidden_layer_sizes=value_hidden_layer_sizes,
       activation=activation,
       obs_key=value_obs_key,
   )
-  encoder_network = networks.make_value_network(
+  encoder_network = networks.make_policy_network(
+      encoder_size,
       privileged_size,
       preprocess_observations_fn=preprocess_observations_fn,
       hidden_layer_sizes=encoder_hidden_layer_sizes,

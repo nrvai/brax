@@ -46,6 +46,7 @@ def actor_step(
         reward=nstate.reward,
         discount=1 - nstate.done,
         next_observation=nstate.obs,
+        next_priv=nstate.priv,
         extras={
             'policy_extras': policy_extras,
             'state_extras': state_extras
