@@ -80,7 +80,7 @@ def make_ppo_networks(
     preprocess_observations_fn: types.PreprocessObservationFn = types.identity_observation_preprocessor,
     policy_hidden_layer_sizes: Sequence[int] = (32,) * 4,
     value_hidden_layer_sizes: Sequence[int] = (256,) * 5,
-    encoder_hidden_layer_sizes: Sequence[int] = (512, 512),
+    encoder_hidden_layer_sizes: Sequence[int] = (128,) * 3,
     activation: networks.ActivationFn = linen.swish,
     policy_obs_key: str = 'state',
     value_obs_key: str = 'state',
@@ -90,7 +90,7 @@ def make_ppo_networks(
   parametric_action_distribution = distribution.NormalTanhDistribution(
       event_size=action_size
   )
-  encoder_size = 128
+  encoder_size = encoder_hidden_layer_sizes[-1]
   full_obs_size = observation_size + encoder_size
   policy_network = networks.make_policy_network(
       parametric_action_distribution.param_size,

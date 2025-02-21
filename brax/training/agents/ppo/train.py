@@ -72,6 +72,8 @@ class DomainRandomizationWrapper(Wrapper):
 def ppo_train(
     environment: Union[envs_v1.Env, envs.Env],
     policy_hidden_layer_sizes: tuple,
+    encoder_hidden_layer_sizes: tuple,
+    value_hidden_layer_sizes: tuple,
     num_timesteps: int,
     episode_length: int,
     action_repeat: int = 1,
@@ -102,6 +104,8 @@ def ppo_train(
             state.priv.shape[-1],
             env.action_size,
             policy_hidden_layer_sizes=policy_hidden_layer_sizes,
+            encoder_hidden_layer_sizes=encoder_hidden_layer_sizes,
+            value_hidden_layer_sizes=value_hidden_layer_sizes,
             preprocess_observations_fn=running_statistics.normalize)
 
         make_policy = ppo_networks.make_inference_fn(ppo_network)
@@ -303,17 +307,16 @@ def ppo_train(
 
         progress_fn(current_step, metrics, make_policy, training_state, curriculum)
 
+        _curr = curriculum
         if curriculum == 0 and metrics["train/linear"] > 0.7:
             curriculum = 1
-            print("curriculum set to 1")
         elif curriculum == 1 and metrics["train/linear"] > 0.8:
             curriculum = 2
-            print("curriculum set to 2")
         elif curriculum == 2 and metrics["train/linear"] > 0.8:
             curriculum = 3
-            print("curriculum set to 2")
         elif curriculum == 3 and metrics["train/linear"] > 0.75:
             curriculum = 4
-            print("curriculum set to 2")
+        if _curr != curriculum:
+            print(f"curriculum set to {curriculum}")
 
     return (make_policy, params, metrics)
