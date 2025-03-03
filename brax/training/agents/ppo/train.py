@@ -15,6 +15,8 @@
 import functools
 from typing import Callable, Union
 
+import numpy as np
+
 import flax
 import jax
 import jax.numpy as jnp
@@ -42,31 +44,24 @@ class TrainingState:
     env_steps: jnp.ndarray
 
 
-class DomainRandomizationWrapper(Wrapper):
+class HeightFieldWrapper(Wrapper):
     def __init__(self, env: Env, key: jax.Array):
         super().__init__(env)
         self.key = key
 
-    def env_fn(self, sys: System) -> Env:
-        env = self.env
-        env.unwrapped.sys = sys
-        return env
-
-    def step(self, state: State, action: jax.Array) -> State:
+    def step(self, state: State, action: jax.Array, *args) -> State:
         sys = self.env.unwrapped.sys
         key, sub_key = jax.random.split(self.key, 2)
         self.key = key
 
-        hf_max_scale = jax.lax.cond(state.info["curriculum"] == 1, lambda: 1, lambda: 0)
-        hf_max_scale = jax.lax.cond(state.info["curriculum"] == 2, lambda: 2, lambda: hf_max_scale)
-        hf_max_scale = jax.lax.cond(state.info["curriculum"] == 3, lambda: 5, lambda: hf_max_scale)
+        hf_max_scale = jax.lax.cond(state.info["curriculum"] == 1, lambda: 2, lambda: 0)
+        hf_max_scale = jax.lax.cond(state.info["curriculum"] == 2, lambda: 4, lambda: hf_max_scale)
+        hf_max_scale = jax.lax.cond(state.info["curriculum"] == 3, lambda: 6, lambda: hf_max_scale)
         hf_max_scale = jax.lax.cond(state.info["curriculum"] > 3, lambda: 10, lambda: hf_max_scale)
         hf_scale = jax.random.randint(sub_key, (1,), 0, hf_max_scale + 1)[0] / 10.0
 
-        new_sys = sys.replace(hfield_data=sys.hfield_data * hf_scale)
-        new_env = self.env_fn(new_sys)
-        state = new_env.step(state, action)
-        return state
+        self.env.unwrapped.sys = sys.replace(hfield_data=sys.hfield_data * hf_scale)
+        return self.env.step(state, action, *args)
 
 
 def ppo_train(
@@ -74,10 +69,11 @@ def ppo_train(
     policy_hidden_layer_sizes: tuple,
     encoder_hidden_layer_sizes: tuple,
     value_hidden_layer_sizes: tuple,
-    num_timesteps: int,
+    epoch_training_steps: int,
     episode_length: int,
     action_repeat: int = 1,
     num_envs: int = 1,
+    run_eval: bool = True,
     num_eval_envs: int = 128,
     learning_rate: float = 1e-4,
     entropy_cost: float = 1e-4,
@@ -87,7 +83,7 @@ def ppo_train(
     batch_size: int = 32,
     num_minibatches: int = 16,
     num_updates_per_batch: int = 2,
-    num_evals: int = 1,
+    num_epochs: int = 1,
     reward_scaling: float = 1.0,
     clipping_epsilon: float = 0.3,
     gae_lambda: float = 0.95,
@@ -255,7 +251,7 @@ def ppo_train(
 
     def wrap_train_env(env):
         env = EpisodeWrapper(env, episode_length, action_repeat)
-        env = DomainRandomizationWrapper(env, domain_key)
+        env = HeightFieldWrapper(env, domain_key)
         env = VmapWrapper(env)
         env = AutoResetWrapper(env)
         env.reset = jax.jit(env.reset)
@@ -269,7 +265,6 @@ def ppo_train(
         return env
 
     env_steps_per_training_step = batch_size * unroll_length * num_minibatches * action_repeat
-    epoch_training_steps = jnp.ceil(num_timesteps / (max(num_evals - 1, 1) * env_steps_per_training_step)).astype(int)
 
     key = jax.random.PRNGKey(seed=seed)
     key, env_key, key_policy, key_value, key_enc, epoch_key, eval_key, domain_key = jax.random.split(key, 8)
@@ -279,22 +274,23 @@ def ppo_train(
     state = env.reset(key_envs)
     make_policy, training_state, gradient_update_fn = init_training_components()
 
-    evaluator = Evaluator(
-        wrap_eval_env(environment),
-        functools.partial(make_policy, deterministic=deterministic_eval),
-        num_eval_envs=num_eval_envs, episode_length=episode_length,
-        action_repeat=action_repeat, key=eval_key
-    )
-
     current_step = 0
     curriculum = 0
 
     params = (training_state.normalizer_params, training_state.params.policy)
     enc_params = (training_state.enc_normalizer_params, training_state.params.encoder)
-    metrics = evaluator.run_evaluation(params, enc_params, {})
-    progress_fn(current_step, metrics, make_policy, training_state, curriculum)
+    metrics = {}
+    if run_eval:
+        evaluator = Evaluator(
+            wrap_eval_env(environment),
+            functools.partial(make_policy, deterministic=deterministic_eval),
+            num_eval_envs=num_eval_envs, episode_length=episode_length,
+            action_repeat=action_repeat, key=eval_key
+        )
+        metrics = evaluator.run_evaluation(params, enc_params, {})
+        progress_fn(current_step, metrics, make_policy, training_state, curriculum)
 
-    for _ in range(num_evals):
+    for _ in range(num_epochs):
         key, epoch_key = jax.random.split(key, 2)
 
         state.info["curriculum"] = jnp.full(num_envs, curriculum)
@@ -303,18 +299,18 @@ def ppo_train(
 
         params = (training_state.normalizer_params, training_state.params.policy)
         enc_params = (training_state.enc_normalizer_params, training_state.params.encoder)
-        metrics = evaluator.run_evaluation(params, enc_params, train_metrics)
+        metrics = evaluator.run_evaluation(params, enc_params, train_metrics) if run_eval else train_metrics
 
         progress_fn(current_step, metrics, make_policy, training_state, curriculum)
 
         _curr = curriculum
-        if curriculum == 0 and metrics["train/linear"] > 0.7:
+        if curriculum == 0 and metrics["train/episode_metrics"]["linear"] > 450:
             curriculum = 1
-        elif curriculum == 1 and metrics["train/linear"] > 0.8:
+        elif curriculum == 1 and metrics["train/episode_metrics"]["linear"] > 450:
             curriculum = 2
-        elif curriculum == 2 and metrics["train/linear"] > 0.8:
+        elif curriculum == 2 and metrics["train/episode_metrics"]["linear"] > 450:
             curriculum = 3
-        elif curriculum == 3 and metrics["train/linear"] > 0.75:
+        elif curriculum == 3 and metrics["train/episode_metrics"]["linear"] > 450:
             curriculum = 4
         if _curr != curriculum:
             print(f"curriculum set to {curriculum}")
