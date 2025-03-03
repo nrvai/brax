@@ -64,6 +64,52 @@ class HeightFieldWrapper(Wrapper):
         return self.env.step(state, action, *args)
 
 
+class StairsWrapper(Wrapper):
+    def __init__(self, env: Env, key: jax.Array):
+        super().__init__(env)
+        self.key = key
+        self.stair_configs = jnp.array([
+            (2, 6, 0.4, 5),
+            (2, 32, 0.4, 5),
+            (8, 6, 0.5, 5),
+            (8, 6, 1.0, 5)
+        ])
+
+    def get_pyramid_stairs(self, num_cycles=4, num_stairs=5, step_height=1.5, flat_area=5):
+        nrows, ncols = 256, 256
+        mid_point = nrows // 2
+        hf_data = np.zeros((nrows, ncols))
+
+        for i in range(nrows):
+            for j in range(ncols):
+                dist_x = max(0, abs(i - mid_point) - flat_area)
+                dist_y = max(0, abs(j - mid_point) - flat_area)
+                dist = max(dist_x, dist_y)
+
+                stair_idx = (dist * num_cycles * num_stairs) // (mid_point - flat_area)
+                direction = (stair_idx // num_stairs) % 2 == 0
+                step_i = stair_idx % num_stairs
+                height = step_i if direction else num_stairs - step_i
+                hf_data[i, j] = height * step_height
+
+        return hf_data.flatten()
+
+    def step(self, state: State, action: jax.Array, *args) -> State:
+        sys = self.env.unwrapped.sys
+        key, sub_key = jax.random.split(self.key, 2)
+        self.key = key
+
+        stairs_id = jax.random.randint(sub_key, (1,), 0, state.info["curriculum"] + 1)[0]
+        hf_data = sys.hfield_data * 0.0
+        hf_data = jax.lax.cond(stairs_id == 1, lambda: self.get_pyramid_stairs(2, 6, 0.4), lambda: hf_data)
+        hf_data = jax.lax.cond(stairs_id == 2, lambda: self.get_pyramid_stairs(2, 32, 0.4), lambda: hf_data)
+        hf_data = jax.lax.cond(stairs_id == 3, lambda: self.get_pyramid_stairs(8, 6, 0.5), lambda: hf_data)
+        hf_data = jax.lax.cond(stairs_id == 4, lambda: self.get_pyramid_stairs(8, 6, 1.0), lambda: hf_data)
+
+        self.env.unwrapped.sys = sys.replace(hfield_data=sys.hfield_data * 0.0 + hf_data)
+        return self.env.step(state, action, *args)
+
+
 def ppo_train(
     environment: Union[envs_v1.Env, envs.Env],
     policy_hidden_layer_sizes: tuple,
@@ -251,7 +297,7 @@ def ppo_train(
 
     def wrap_train_env(env):
         env = EpisodeWrapper(env, episode_length, action_repeat)
-        env = HeightFieldWrapper(env, domain_key)
+        env = StairsWrapper(env, domain_key)
         env = VmapWrapper(env)
         env = AutoResetWrapper(env)
         env.reset = jax.jit(env.reset)
