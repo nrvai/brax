@@ -45,23 +45,40 @@ class TrainingState:
 
 
 class HeightFieldWrapper(Wrapper):
-    def __init__(self, env: Env, key: jax.Array):
+    def __init__(self, env: Env):
         super().__init__(env)
-        self.key = key
+        self.hf_data = self.env.unwrapped.sys.hfield_data * 1.0
+
+    def env_fn(self, sys: System) -> Env:
+        env = self.env
+        env.unwrapped.sys = sys
+        return env
 
     def step(self, state: State, action: jax.Array, *args) -> State:
+        def update_hf_scale():
+            hf_max_scale = jax.lax.cond(state.info["curriculum"] == 1, lambda: 2, lambda: 0)
+            hf_max_scale = jax.lax.cond(state.info["curriculum"] == 2, lambda: 4, lambda: hf_max_scale)
+            hf_max_scale = jax.lax.cond(state.info["curriculum"] == 3, lambda: 6, lambda: hf_max_scale)
+            hf_max_scale = jax.lax.cond(state.info["curriculum"] > 3, lambda: 10, lambda: hf_max_scale)
+            return jax.random.randint(sub_rng, (1,), 0, hf_max_scale + 1)[0] / 10.0
+
+        rng, sub_rng = jax.random.split(state.info["rng"], 2)
+        hf_scale = jax.lax.cond(
+            state.info["step"] % 200 == 0,
+            update_hf_scale,
+            lambda: state.info["hf_scale"]
+        )
+
+        hf_data = self.hf_data * hf_scale
         sys = self.env.unwrapped.sys
-        key, sub_key = jax.random.split(self.key, 2)
-        self.key = key
+        new_sys = sys.replace(hfield_data=hf_data)
+        new_env = self.env_fn(new_sys)
 
-        hf_max_scale = jax.lax.cond(state.info["curriculum"] == 1, lambda: 2, lambda: 0)
-        hf_max_scale = jax.lax.cond(state.info["curriculum"] == 2, lambda: 4, lambda: hf_max_scale)
-        hf_max_scale = jax.lax.cond(state.info["curriculum"] == 3, lambda: 6, lambda: hf_max_scale)
-        hf_max_scale = jax.lax.cond(state.info["curriculum"] > 3, lambda: 10, lambda: hf_max_scale)
-        hf_scale = jax.random.randint(sub_key, (1,), 0, hf_max_scale + 1)[0] / 10.0
+        state.info["rng"] = rng
+        state.info["hf_scale"] = hf_scale
+        state.info["hf_data"] = hf_data
 
-        self.env.unwrapped.sys = sys.replace(hfield_data=sys.hfield_data * hf_scale)
-        return self.env.step(state, action, *args)
+        return new_env.step(state, action, *args)
 
 
 class StairsWrapper(Wrapper):
@@ -297,7 +314,7 @@ def ppo_train(
 
     def wrap_train_env(env):
         env = EpisodeWrapper(env, episode_length, action_repeat)
-        env = StairsWrapper(env, domain_key)
+        env = HeightFieldWrapper(env)
         env = VmapWrapper(env)
         env = AutoResetWrapper(env)
         env.reset = jax.jit(env.reset)
