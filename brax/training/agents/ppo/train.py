@@ -54,6 +54,14 @@ class HeightFieldWrapper(Wrapper):
         env.unwrapped.sys = sys
         return env
 
+    def reset(self, rng):
+        state = super().reset(rng)
+        state.info["hf_scale"] = 0.0
+        state.info["hf_min"] = 0.0
+        state.info["hf_max"] = 0.0
+        state.info["hf_data"] = self.hf_data
+        return state
+
     def step(self, state: State, action: jax.Array, *args) -> State:
         def update_hf_scale():
             hf_max_scale = jax.lax.cond(state.info["curriculum"] == 1, lambda: 2, lambda: 0)
@@ -77,6 +85,8 @@ class HeightFieldWrapper(Wrapper):
         state.info["rng"] = rng
         state.info["hf_scale"] = hf_scale
         state.info["hf_data"] = hf_data
+        state.info["hf_min"] = hf_data.min()
+        state.info["hf_max"] = hf_data.max()
 
         return new_env.step(state, action, *args)
 
