@@ -48,6 +48,36 @@ class HeightFieldWrapper(Wrapper):
     def __init__(self, env: Env):
         super().__init__(env)
         self.hf_data = self.env.unwrapped.sys.hfield_data * 1.0
+        self.hf_size = self.env.unwrapped.sys.hfield_nrow * self.env.unwrapped.sys.hfield_ncol
+
+    def _get_pyramid_stairs(self, scale_rng, curriculum, flat_area=5):
+        nc_rng, ns_rng, sh_rng = jax.random.split(scale_rng, 3)
+        max_nc = 8
+        max_ns = 8
+        max_sh = curriculum * 2
+
+        num_cycles = jax.random.randint(nc_rng, (1,), 0, max_nc)[0]
+        num_stairs = jax.random.randint(ns_rng, (1,), 0, max_ns)[0]
+        step_height = jax.random.randint(sh_rng, (1,), 0, max_sh)[0] / 10.0
+
+        nrows, ncols = 256, 256
+        mid_point = nrows // 2
+
+        i = jnp.arange(nrows)[:, None]
+        j = jnp.arange(ncols)[None, :]
+
+        dist_x = jnp.maximum(0, jnp.abs(i - mid_point) - flat_area)
+        dist_y = jnp.maximum(0, jnp.abs(j - mid_point) - flat_area)
+        dist = jnp.maximum(dist_x, dist_y)
+
+        stair_idx = (dist * num_cycles * num_stairs) // (mid_point - flat_area)
+        direction = (stair_idx // num_stairs) % 2 == 0
+        step_i = stair_idx % num_stairs
+
+        height = jax.lax.select(direction, step_i, num_stairs - step_i)
+        hf_data = height * step_height
+
+        return hf_data.flatten()
 
     def env_fn(self, sys: System) -> Env:
         env = self.env
@@ -57,6 +87,7 @@ class HeightFieldWrapper(Wrapper):
     def reset(self, rng):
         state = super().reset(rng)
         state.info["hf_scale"] = 0.0
+        state.info["hf_add"] = jnp.zeros(self.hf_size)
         state.info["hf_min"] = 0.0
         state.info["hf_max"] = 0.0
         state.info["hf_data"] = self.hf_data
@@ -68,73 +99,33 @@ class HeightFieldWrapper(Wrapper):
             hf_max_scale = jax.lax.cond(state.info["curriculum"] == 2, lambda: 4, lambda: hf_max_scale)
             hf_max_scale = jax.lax.cond(state.info["curriculum"] == 3, lambda: 6, lambda: hf_max_scale)
             hf_max_scale = jax.lax.cond(state.info["curriculum"] > 3, lambda: 10, lambda: hf_max_scale)
-            return jax.random.randint(sub_rng, (1,), 0, hf_max_scale + 1)[0] / 10.0
+            return jax.random.randint(scale_rng, (1,), 0, hf_max_scale + 1)[0] / 10.0
 
-        rng, sub_rng = jax.random.split(state.info["rng"], 2)
+        rng, scale_rng, add_rng = jax.random.split(state.info["rng"], 3)
         hf_scale = jax.lax.cond(
             state.info["step"] % 200 == 0,
             update_hf_scale,
             lambda: state.info["hf_scale"]
         )
+        hf_add = jax.lax.cond(
+            state.done,
+            lambda: self._get_pyramid_stairs(add_rng, state.info["curriculum"]),
+            lambda: state.info["hf_add"]
+        )
 
-        hf_data = self.hf_data * hf_scale
+        hf_data = self.hf_data * hf_scale + hf_add
         sys = self.env.unwrapped.sys
         new_sys = sys.replace(hfield_data=hf_data)
         new_env = self.env_fn(new_sys)
 
         state.info["rng"] = rng
         state.info["hf_scale"] = hf_scale
+        state.info["hf_add"] = hf_add
         state.info["hf_data"] = hf_data
         state.info["hf_min"] = hf_data.min()
         state.info["hf_max"] = hf_data.max()
 
         return new_env.step(state, action, *args)
-
-
-class StairsWrapper(Wrapper):
-    def __init__(self, env: Env, key: jax.Array):
-        super().__init__(env)
-        self.key = key
-        self.stair_configs = jnp.array([
-            (2, 6, 0.4, 5),
-            (2, 32, 0.4, 5),
-            (8, 6, 0.5, 5),
-            (8, 6, 1.0, 5)
-        ])
-
-    def get_pyramid_stairs(self, num_cycles=4, num_stairs=5, step_height=1.5, flat_area=5):
-        nrows, ncols = 256, 256
-        mid_point = nrows // 2
-        hf_data = np.zeros((nrows, ncols))
-
-        for i in range(nrows):
-            for j in range(ncols):
-                dist_x = max(0, abs(i - mid_point) - flat_area)
-                dist_y = max(0, abs(j - mid_point) - flat_area)
-                dist = max(dist_x, dist_y)
-
-                stair_idx = (dist * num_cycles * num_stairs) // (mid_point - flat_area)
-                direction = (stair_idx // num_stairs) % 2 == 0
-                step_i = stair_idx % num_stairs
-                height = step_i if direction else num_stairs - step_i
-                hf_data[i, j] = height * step_height
-
-        return hf_data.flatten()
-
-    def step(self, state: State, action: jax.Array, *args) -> State:
-        sys = self.env.unwrapped.sys
-        key, sub_key = jax.random.split(self.key, 2)
-        self.key = key
-
-        stairs_id = jax.random.randint(sub_key, (1,), 0, state.info["curriculum"] + 1)[0]
-        hf_data = sys.hfield_data * 0.0
-        hf_data = jax.lax.cond(stairs_id == 1, lambda: self.get_pyramid_stairs(2, 6, 0.4), lambda: hf_data)
-        hf_data = jax.lax.cond(stairs_id == 2, lambda: self.get_pyramid_stairs(2, 32, 0.4), lambda: hf_data)
-        hf_data = jax.lax.cond(stairs_id == 3, lambda: self.get_pyramid_stairs(8, 6, 0.5), lambda: hf_data)
-        hf_data = jax.lax.cond(stairs_id == 4, lambda: self.get_pyramid_stairs(8, 6, 1.0), lambda: hf_data)
-
-        self.env.unwrapped.sys = sys.replace(hfield_data=sys.hfield_data * 0.0 + hf_data)
-        return self.env.step(state, action, *args)
 
 
 def ppo_train(
@@ -162,7 +153,7 @@ def ppo_train(
     gae_lambda: float = 0.95,
     deterministic_eval: bool = False,
     normalize_advantage: bool = True,
-    progress_fn: Callable = lambda *args: None,
+    progress_fn: Callable = lambda *_: None,
     checkpoint: dict = None,
     curriculum: int = 0,
     **kwargs
@@ -377,14 +368,20 @@ def ppo_train(
         progress_fn(current_step, metrics, make_policy, training_state, curriculum)
 
         _curr = curriculum
-        if curriculum == 0 and metrics["train/episode_metrics"]["linear"] > 450:
+        if curriculum == 0 and metrics["train/episode_metrics"]["linear"] > 350:
             curriculum = 1
-        elif curriculum == 1 and metrics["train/episode_metrics"]["linear"] > 450:
+        elif curriculum == 1 and metrics["train/episode_metrics"]["linear"] > 350:
             curriculum = 2
-        elif curriculum == 2 and metrics["train/episode_metrics"]["linear"] > 450:
+        elif curriculum == 2 and metrics["train/episode_metrics"]["linear"] > 350:
             curriculum = 3
-        elif curriculum == 3 and metrics["train/episode_metrics"]["linear"] > 450:
+        elif curriculum == 3 and metrics["train/episode_metrics"]["linear"] > 350:
             curriculum = 4
+        elif curriculum == 4 and metrics["train/episode_metrics"]["linear"] > 300:
+            curriculum = 5
+        elif curriculum == 5 and metrics["train/episode_metrics"]["linear"] > 300:
+            curriculum = 6
+        elif curriculum == 6 and metrics["train/episode_metrics"]["linear"] > 300:
+            curriculum = 7
         if _curr != curriculum:
             print(f"curriculum set to {curriculum}")
 
