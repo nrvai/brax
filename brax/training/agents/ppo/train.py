@@ -56,9 +56,9 @@ class HeightFieldWrapper(Wrapper):
         max_ns = 8
         max_sh = curriculum * 2
 
-        num_cycles = jax.random.randint(nc_rng, (1,), 0, max_nc)[0]
-        num_stairs = jax.random.randint(ns_rng, (1,), 0, max_ns)[0]
-        step_height = jax.random.randint(sh_rng, (1,), 0, max_sh)[0] / 10.0
+        num_cycles = jax.random.randint(nc_rng, (1,), 0, max_nc + 1)[0]
+        num_stairs = jax.random.randint(ns_rng, (1,), 0, max_ns + 1)[0]
+        step_height = jax.random.randint(sh_rng, (1,), 0, max_sh + 1)[0] / 10.0
 
         nrows, ncols = 256, 256
         mid_point = nrows // 2
@@ -95,11 +95,7 @@ class HeightFieldWrapper(Wrapper):
 
     def step(self, state: State, action: jax.Array, *args) -> State:
         def update_hf_scale():
-            hf_max_scale = jax.lax.cond(state.info["curriculum"] == 1, lambda: 2, lambda: 0)
-            hf_max_scale = jax.lax.cond(state.info["curriculum"] == 2, lambda: 4, lambda: hf_max_scale)
-            hf_max_scale = jax.lax.cond(state.info["curriculum"] == 3, lambda: 6, lambda: hf_max_scale)
-            hf_max_scale = jax.lax.cond(state.info["curriculum"] > 3, lambda: 10, lambda: hf_max_scale)
-            return jax.random.randint(scale_rng, (1,), 0, hf_max_scale + 1)[0] / 10.0
+            return jax.random.randint(scale_rng, (1,), 0, state.info["curriculum"] * 2 + 1)[0] / 10.0
 
         rng, scale_rng, add_rng = jax.random.split(state.info["rng"], 3)
         hf_scale = jax.lax.cond(
