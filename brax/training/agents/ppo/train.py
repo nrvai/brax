@@ -58,7 +58,7 @@ class HeightFieldWrapper(Wrapper):
 
         num_cycles = jax.random.randint(nc_rng, (1,), 0, max_nc + 1)[0]
         num_stairs = jax.random.randint(ns_rng, (1,), 0, max_ns + 1)[0]
-        step_height = jax.random.randint(sh_rng, (1,), 0, max_sh + 1)[0] / 10.0
+        step_height = jax.random.randint(sh_rng, (1,), 0, max_sh + 1)[0] / 100.0
 
         nrows, ncols = 256, 256
         mid_point = nrows // 2
@@ -94,13 +94,10 @@ class HeightFieldWrapper(Wrapper):
         return state
 
     def step(self, state: State, action: jax.Array, *args) -> State:
-        def update_hf_scale():
-            return jax.random.randint(scale_rng, (1,), 0, state.info["curriculum"] * 2 + 1)[0] / 10.0
-
         rng, scale_rng, add_rng = jax.random.split(state.info["rng"], 3)
         hf_scale = jax.lax.cond(
             state.info["step"] % 200 == 0,
-            update_hf_scale,
+            lambda: jax.random.randint(scale_rng, (1,), 0, state.info["curriculum"] * 2 + 1)[0] / 100.0,
             lambda: state.info["hf_scale"]
         )
         hf_add = jax.lax.cond(
@@ -187,7 +184,7 @@ def ppo_train(
         else:
             policy_params = ppo_network.policy_network.init(key_policy)
             value_params = ppo_network.value_network.init(key_value)
-            normalizer_params = running_statistics.init_state(specs.Array((state.obs.shape[-1] + 128), jnp.dtype("float32")))
+            normalizer_params = running_statistics.init_state(specs.Array((state.obs.shape[-1] + encoder_hidden_layer_sizes[-1]), jnp.dtype("float32")))
             enc_params = ppo_network.encoder_network.init(key_enc)
             enc_normalizer_params = running_statistics.init_state(specs.Array(state.priv.shape[-1:], jnp.dtype("float32")))
 
@@ -376,8 +373,8 @@ def ppo_train(
             curriculum = 5
         elif curriculum == 5 and metrics["train/episode_metrics"]["linear"] > 300:
             curriculum = 6
-        elif curriculum == 6 and metrics["train/episode_metrics"]["linear"] > 300:
-            curriculum = 7
+        elif metrics["train/episode_metrics"]["linear"] > 300:
+            curriculum += 1
         if _curr != curriculum:
             print(f"curriculum set to {curriculum}")
 
