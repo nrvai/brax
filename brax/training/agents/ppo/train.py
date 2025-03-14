@@ -32,6 +32,7 @@ from brax.training.agents.ppo import networks as ppo_networks
 from brax.v1 import envs as envs_v1
 
 from brax.training.acting import Evaluator, generate_unroll
+from nrv_lab.sim.worldgen import get_curriculum_stairs, get_curriculum_slopes
 
 
 @flax.struct.dataclass
@@ -50,35 +51,6 @@ class HeightFieldWrapper(Wrapper):
         self.hf_data = self.env.unwrapped.sys.hfield_data * 1.0
         self.hf_size = self.env.unwrapped.sys.hfield_nrow * self.env.unwrapped.sys.hfield_ncol
 
-    def _get_pyramid_stairs(self, scale_rng, curriculum, flat_area=5):
-        nc_rng, ns_rng, sh_rng = jax.random.split(scale_rng, 3)
-        max_nc = 8
-        max_ns = 8
-        max_sh = curriculum * 2
-
-        num_cycles = jax.random.randint(nc_rng, (1,), 0, max_nc + 1)[0]
-        num_stairs = jax.random.randint(ns_rng, (1,), 0, max_ns + 1)[0]
-        step_height = jax.random.randint(sh_rng, (1,), 0, max_sh + 1)[0] / 100.0
-
-        nrows, ncols = 256, 256
-        mid_point = nrows // 2
-
-        i = jnp.arange(nrows)[:, None]
-        j = jnp.arange(ncols)[None, :]
-
-        dist_x = jnp.maximum(0, jnp.abs(i - mid_point) - flat_area)
-        dist_y = jnp.maximum(0, jnp.abs(j - mid_point) - flat_area)
-        dist = jnp.maximum(dist_x, dist_y)
-
-        stair_idx = (dist * num_cycles * num_stairs) // (mid_point - flat_area)
-        direction = (stair_idx // num_stairs) % 2 == 0
-        step_i = stair_idx % num_stairs
-
-        height = jax.lax.select(direction, step_i, num_stairs - step_i)
-        hf_data = height * step_height
-
-        return hf_data.flatten()
-
     def env_fn(self, sys: System) -> Env:
         env = self.env
         env.unwrapped.sys = sys
@@ -94,15 +66,23 @@ class HeightFieldWrapper(Wrapper):
         return state
 
     def step(self, state: State, action: jax.Array, *args) -> State:
+        def get_hf_add(rng, curriculum):
+            fn_rng, rng = jax.random.split(rng)
+            fn_id = jax.random.randint(rng, (1,), 0, 2)[0]
+
+            hf_add = get_curriculum_slopes(fn_rng, curriculum)
+            hf_add = jax.lax.cond(fn_id == 1, lambda: get_curriculum_stairs(fn_rng, curriculum), lambda: hf_add)
+            return hf_add
+
         rng, scale_rng, add_rng = jax.random.split(state.info["rng"], 3)
         hf_scale = jax.lax.cond(
-            state.info["step"] % 200 == 0,
+            state.done,
             lambda: jax.random.randint(scale_rng, (1,), 0, state.info["curriculum"] * 2 + 1)[0] / 100.0,
             lambda: state.info["hf_scale"]
         )
         hf_add = jax.lax.cond(
             state.done,
-            lambda: self._get_pyramid_stairs(add_rng, state.info["curriculum"]),
+            lambda: get_hf_add(add_rng, state.info["curriculum"]),
             lambda: state.info["hf_add"]
         )
 
@@ -184,7 +164,8 @@ def ppo_train(
         else:
             policy_params = ppo_network.policy_network.init(key_policy)
             value_params = ppo_network.value_network.init(key_value)
-            normalizer_params = running_statistics.init_state(specs.Array((state.obs.shape[-1] + encoder_hidden_layer_sizes[-1]), jnp.dtype("float32")))
+            normalizer_params = running_statistics.init_state(specs.Array(
+                (state.obs.shape[-1] + encoder_hidden_layer_sizes[-1]), jnp.dtype("float32")))
             enc_params = ppo_network.encoder_network.init(key_enc)
             enc_normalizer_params = running_statistics.init_state(specs.Array(state.priv.shape[-1:], jnp.dtype("float32")))
 
