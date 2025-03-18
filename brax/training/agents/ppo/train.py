@@ -340,19 +340,19 @@ def ppo_train(
         progress_fn(current_step, metrics, make_policy, training_state, curriculum)
 
         _curr = curriculum
-        if curriculum == 0 and metrics["train/episode_metrics"]["sum_reward"] > 450:
+        if curriculum == 0 and metrics["train/episode_metrics"]["linear"] > 400:
             curriculum = 1
-        elif curriculum == 1 and metrics["train/episode_metrics"]["sum_reward"] > 200:
+        elif curriculum == 1 and metrics["train/episode_metrics"]["linear"] > 200:
             curriculum = 2
-        elif curriculum == 2 and metrics["train/episode_metrics"]["sum_reward"] > 200:
+        elif curriculum == 2 and metrics["train/episode_metrics"]["linear"] > 200:
             curriculum = 3
-        elif curriculum == 3 and metrics["train/episode_metrics"]["sum_reward"] > 200:
+        elif curriculum == 3 and metrics["train/episode_metrics"]["linear"] > 200:
             curriculum = 4
-        elif curriculum == 4 and metrics["train/episode_metrics"]["sum_reward"] > 200:
+        elif curriculum == 4 and metrics["train/episode_metrics"]["linear"] > 200:
             curriculum = 5
-        elif curriculum == 5 and metrics["train/episode_metrics"]["sum_reward"] > 200:
+        elif curriculum == 5 and metrics["train/episode_metrics"]["linear"] > 200:
             curriculum = 6
-        elif metrics["train/episode_metrics"]["sum_reward"] > 200:
+        elif metrics["train/episode_metrics"]["linear"] > 200:
             curriculum += 1
         if _curr != curriculum:
             print(f"curriculum set to {curriculum}")
