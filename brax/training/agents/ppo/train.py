@@ -32,7 +32,7 @@ from brax.training.agents.ppo import networks as ppo_networks
 from brax.v1 import envs as envs_v1
 
 from brax.training.acting import Evaluator, generate_unroll
-from nrv_lab.sim.worldgen import get_curriculum_stairs, get_curriculum_slopes
+from nrv_lab.sim.worldgen import get_curriculum_stairs, get_curriculum_slopes, get_curriculum_holes
 
 
 @flax.struct.dataclass
@@ -68,20 +68,21 @@ class HeightFieldWrapper(Wrapper):
     def step(self, state: State, action: jax.Array, *args) -> State:
         def get_hf_add(rng, curriculum):
             fn_rng, rng = jax.random.split(rng)
-            fn_id = jax.random.randint(rng, (1,), 0, 2)[0]
+            fn_id = jax.random.randint(rng, (1,), 0, 3)[0]
 
             hf_add = get_curriculum_slopes(fn_rng, curriculum)
             hf_add = jax.lax.cond(fn_id == 1, lambda: get_curriculum_stairs(fn_rng, curriculum), lambda: hf_add)
+            hf_add = jax.lax.cond(fn_id == 2, lambda: get_curriculum_holes(fn_rng, curriculum), lambda: hf_add)
             return hf_add
 
         rng, scale_rng, add_rng = jax.random.split(state.info["rng"], 3)
         hf_scale = jax.lax.cond(
-            state.done,
-            lambda: jax.random.randint(scale_rng, (1,), 0, state.info["curriculum"] * 2 + 1)[0] / 100.0,
+            state.info["steps"] == 0,
+            lambda: jax.random.randint(scale_rng, (1,), 0, state.info["curriculum"] * 2)[0] / 100.0,
             lambda: state.info["hf_scale"]
         )
         hf_add = jax.lax.cond(
-            state.done,
+            state.info["steps"] == 0,
             lambda: get_hf_add(add_rng, state.info["curriculum"]),
             lambda: state.info["hf_add"]
         )
@@ -209,15 +210,15 @@ def ppo_train(
         key, key_perm, key_grad = jax.random.split(key, 3)
 
         def shuffle(x: jnp.ndarray):
-            x = jax.random.permutation(key_perm, x)  # (minibatch * batch, unroll)
-            x = jnp.reshape(x, (num_minibatches, -1) + x.shape[1:])  # (minibatch, batch, unroll)
+            x = jax.random.permutation(key_perm, x)
+            x = jnp.reshape(x, (num_minibatches, -1) + x.shape[1:])
             return x
 
         shuffled_data = jax.tree_util.tree_map(shuffle, data)
         (optimizer_state, params, _), metrics = jax.lax.scan(
             functools.partial(minibatch_step, normalizer_params=normalizer_params, enc_normalizer_params=enc_normalizer_params),
             (optimizer_state, params, key_grad),
-            shuffled_data,
+            shuffled_data,  # [batch, unroll_length, -1]
             length=num_minibatches
         )
         return (optimizer_state, params, key), metrics
@@ -248,22 +249,19 @@ def ppo_train(
             length=batch_size * num_minibatches // num_envs
         )
 
-        data = jax.tree_util.tree_map(lambda x: jnp.swapaxes(x, 1, 2), data)
-        data = jax.tree_util.tree_map(lambda x: jnp.reshape(x, (-1,) + x.shape[2:]), data)
+        # (bs * nmb // nenvs, unroll_length, nenvs, -1)
+        data = jax.tree_util.tree_map(lambda x: jnp.swapaxes(x, 1, 2), data)  # (bs * nmb // nenvs, nenvs, unroll_length, -1)
+        data = jax.tree_util.tree_map(lambda x: jnp.reshape(x, (-1,) + x.shape[2:]), data)  # (bs * nmb, unroll_length, -1)
 
         normalizer_params = running_statistics.update(
             training_state.normalizer_params,
             data.extras["policy_extras"]["encoding"]
-            # jnp.concatenate([data.observation, data.extras["policy_extras"]["encoding"]], axis=-1)
         )
 
-        enc_normalizer_params = running_statistics.update(
-            training_state.enc_normalizer_params,
-            data.priv)
+        enc_normalizer_params = running_statistics.update(training_state.enc_normalizer_params, data.priv)
 
         (optimizer_state, params, _), metrics = jax.lax.scan(
-            functools.partial(
-                sgd_step, data=data, normalizer_params=normalizer_params, enc_normalizer_params=enc_normalizer_params),
+            functools.partial(sgd_step, data=data, normalizer_params=normalizer_params, enc_normalizer_params=enc_normalizer_params),
             (training_state.optimizer_state, training_state.params, key_loss), (),
             length=num_updates_per_batch
         )
@@ -342,19 +340,19 @@ def ppo_train(
         progress_fn(current_step, metrics, make_policy, training_state, curriculum)
 
         _curr = curriculum
-        if curriculum == 0 and metrics["train/episode_metrics"]["linear"] > 350:
+        if curriculum == 0 and metrics["train/episode_metrics"]["sum_reward"] > 450:
             curriculum = 1
-        elif curriculum == 1 and metrics["train/episode_metrics"]["linear"] > 350:
+        elif curriculum == 1 and metrics["train/episode_metrics"]["sum_reward"] > 200:
             curriculum = 2
-        elif curriculum == 2 and metrics["train/episode_metrics"]["linear"] > 350:
+        elif curriculum == 2 and metrics["train/episode_metrics"]["sum_reward"] > 200:
             curriculum = 3
-        elif curriculum == 3 and metrics["train/episode_metrics"]["linear"] > 350:
+        elif curriculum == 3 and metrics["train/episode_metrics"]["sum_reward"] > 200:
             curriculum = 4
-        elif curriculum == 4 and metrics["train/episode_metrics"]["linear"] > 300:
+        elif curriculum == 4 and metrics["train/episode_metrics"]["sum_reward"] > 200:
             curriculum = 5
-        elif curriculum == 5 and metrics["train/episode_metrics"]["linear"] > 300:
+        elif curriculum == 5 and metrics["train/episode_metrics"]["sum_reward"] > 200:
             curriculum = 6
-        elif metrics["train/episode_metrics"]["linear"] > 300:
+        elif metrics["train/episode_metrics"]["sum_reward"] > 200:
             curriculum += 1
         if _curr != curriculum:
             print(f"curriculum set to {curriculum}")
