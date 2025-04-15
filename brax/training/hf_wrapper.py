@@ -40,9 +40,9 @@ class HeightFieldWrapper(Wrapper):
         rng, scale_rng, add_rng = jax.random.split(state.info["rng"], 3)
         hf_scale = jax.lax.cond(
             state.info["steps"] == 0,
-            lambda: jax.random.randint(scale_rng, (1,), 0, state.info["curriculum"] * 2)[0] / 100.0,
+            lambda: jax.random.randint(scale_rng, (1,), 0, state.info["curriculum"] * 2)[0] / 10.0,
             lambda: state.info["hf_scale"]
-        )
+        ) * self.env.def_hfield_scale
         hf_add = jax.lax.cond(
             state.info["steps"] == 0,
             lambda: get_hf_add(add_rng, state.info["curriculum"]),
