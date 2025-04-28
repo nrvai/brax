@@ -43,6 +43,7 @@ class State(base.Base):
   done: jax.Array
   metrics: Dict[str, jax.Array] = struct.field(default_factory=dict)
   info: Dict[str, Any] = struct.field(default_factory=dict)
+  hidden_state: Optional[jax.Array] = None
 
 
 class Env(abc.ABC):

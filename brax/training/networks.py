@@ -25,16 +25,34 @@ from brax.training.spectral_norm import SNDense
 from flax import linen
 import jax
 import jax.numpy as jnp
-
+from typing import Any, Callable, Sequence, Tuple, Union
 
 ActivationFn = Callable[[jnp.ndarray], jnp.ndarray]
 Initializer = Callable[..., Any]
 
 
 @dataclasses.dataclass
-class FeedForwardNetwork:
-  init: Callable[..., Any]
-  apply: Callable[..., Any]
+class NeuralNetwork:
+    init: Callable[..., Any]
+    apply: Callable[..., Any]
+    reccurent: int = False
+
+
+class GRUPolicy(linen.Module):
+    hidden_size: int
+    output_size: int
+    kernel_init: Initializer = jax.nn.initializers.lecun_uniform()
+
+    @linen.compact
+    def __call__(self, carry: jax.Array, x: jax.Array) -> tuple[jax.Array, jax.Array]:
+        gru = linen.GRUCell()
+        carry, hidden = gru(carry, x)
+        output = linen.Dense(self.output_size, kernel_init=self.kernel_init)(hidden)
+        return carry, output
+
+    @staticmethod
+    def initialize_carry(key, batch_dims, hidden_size):
+        return linen.GRUCell.initialize_carry(key, batch_dims, hidden_size)
 
 
 class MLP(linen.Module):
@@ -189,7 +207,7 @@ def make_policy_network(
     kernel_init: Initializer = jax.nn.initializers.lecun_uniform(),
     layer_norm: bool = False,
     obs_key: str = 'state',
-) -> FeedForwardNetwork:
+) -> NeuralNetwork:
   """Creates a policy network."""
   policy_module = MLP(
       layer_sizes=list(hidden_layer_sizes) + [param_size],
@@ -205,7 +223,7 @@ def make_policy_network(
 
   obs_size = _get_obs_state_size(obs_size, obs_key)
   dummy_obs = jnp.zeros((1, obs_size))
-  return FeedForwardNetwork(
+  return NeuralNetwork(
       init=lambda key: policy_module.init(key, dummy_obs), apply=apply
   )
 
@@ -216,7 +234,7 @@ def make_value_network(
     hidden_layer_sizes: Sequence[int] = (256, 256),
     activation: ActivationFn = linen.relu,
     obs_key: str = 'state',
-) -> FeedForwardNetwork:
+) -> NeuralNetwork:
   """Creates a value network."""
   value_module = MLP(
       layer_sizes=list(hidden_layer_sizes) + [1],
@@ -231,7 +249,7 @@ def make_value_network(
 
   obs_size = _get_obs_state_size(obs_size, obs_key)
   dummy_obs = jnp.zeros((1, obs_size))
-  return FeedForwardNetwork(
+  return NeuralNetwork(
       init=lambda key: value_module.init(key, dummy_obs), apply=apply
   )
 
@@ -244,7 +262,7 @@ def make_q_network(
     activation: ActivationFn = linen.relu,
     n_critics: int = 2,
     layer_norm: bool = False,
-) -> FeedForwardNetwork:
+) -> NeuralNetwork:
   """Creates a value network."""
 
   class QModule(linen.Module):
@@ -274,7 +292,7 @@ def make_q_network(
 
   dummy_obs = jnp.zeros((1, obs_size))
   dummy_action = jnp.zeros((1, action_size))
-  return FeedForwardNetwork(
+  return NeuralNetwork(
       init=lambda key: q_module.init(key, dummy_obs, dummy_action), apply=apply
   )
 
@@ -284,7 +302,7 @@ def make_model(
     obs_size: int,
     activation: Callable[[jnp.ndarray], jnp.ndarray] = linen.swish,
     spectral_norm: bool = False,
-) -> FeedForwardNetwork:
+) -> NeuralNetwork:
   """Creates a model.
 
   Args:
@@ -302,7 +320,7 @@ def make_model(
   dummy_obs = jnp.zeros((1, obs_size))
   if spectral_norm:
     module = SNMLP(layer_sizes=layer_sizes, activation=activation)
-    model = FeedForwardNetwork(
+    model = NeuralNetwork(
         init=lambda rng1, rng2: module.init(
             {'params': rng1, 'sing_vec': rng2}, dummy_obs
         ),
@@ -310,7 +328,7 @@ def make_model(
     )
   else:
     module = MLP(layer_sizes=layer_sizes, activation=activation)
-    model = FeedForwardNetwork(
+    model = NeuralNetwork(
         init=lambda rng: module.init(rng, dummy_obs), apply=module.apply
     )
   return model
@@ -318,7 +336,7 @@ def make_model(
 
 def make_models(
     policy_params_size: int, obs_size: int
-) -> Tuple[FeedForwardNetwork, FeedForwardNetwork]:
+) -> Tuple[NeuralNetwork, NeuralNetwork]:
   """Creates models for policy and value functions.
 
   Args:
@@ -357,7 +375,7 @@ def make_policy_network_vision(
     layer_norm: bool = False,
     state_obs_key: str = '',
     normalise_channels: bool = False,
-) -> FeedForwardNetwork:
+) -> NeuralNetwork:
   """Creates a policy network for vision inputs."""
   module = VisionMLP(
       layer_sizes=list(hidden_layer_sizes) + [output_size],
@@ -379,7 +397,7 @@ def make_policy_network_vision(
   dummy_obs = {
       key: jnp.zeros((1,) + shape) for key, shape in observation_size.items()
   }
-  return FeedForwardNetwork(
+  return NeuralNetwork(
       init=lambda key: module.init(key, dummy_obs), apply=apply
   )
 
@@ -392,7 +410,7 @@ def make_value_network_vision(
     kernel_init: Initializer = jax.nn.initializers.lecun_uniform(),
     state_obs_key: str = '',
     normalise_channels: bool = False,
-) -> FeedForwardNetwork:
+) -> NeuralNetwork:
   """Creates a value network for vision inputs."""
   value_module = VisionMLP(
       layer_sizes=list(hidden_layer_sizes) + [1],
@@ -413,6 +431,82 @@ def make_value_network_vision(
   dummy_obs = {
       key: jnp.zeros((1,) + shape) for key, shape in observation_size.items()
   }
-  return FeedForwardNetwork(
+  return NeuralNetwork(
       init=lambda key: value_module.init(key, dummy_obs), apply=apply
   )
+
+
+class GRUNetwork(linen.Module):
+    """Multi-layer GRU + final projection."""
+    hidden_size: int
+    num_layers: int
+    output_size: int
+    activation: Callable[[jnp.ndarray], jnp.ndarray] = linen.relu
+    kernel_init: Callable[..., Any] = jax.nn.initializers.lecun_uniform()
+    layer_norm: bool = False
+
+    @linen.compact
+    def __call__(
+        self,
+        inputs: jnp.ndarray,               # [batch, obs_dim]
+        state: jnp.ndarray,                # [num_layers, batch, hidden_size]
+    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        x = inputs
+        new_states = []
+
+        for i in range(self.num_layers):
+            carry, y = linen.GRUCell(self.hidden_size, name=f"gru_{i}")(state[i], x)
+
+            x = y
+            if self.layer_norm:
+                x = linen.LayerNorm(name=f"ln_{i}")(x)
+            new_states.append(carry)
+
+        logits = linen.Dense(
+            features=self.output_size,
+            kernel_init=self.kernel_init,
+        )(x)
+        logits = self.activation(logits)
+        new_state = jnp.stack(new_states, axis=0)
+        return logits, new_state
+
+
+def make_recurrent_policy_network(
+    param_size: int,
+    obs_size: int,
+    preprocess_observations_fn: Callable[[Any, Any], jnp.ndarray],
+    hidden_size: int = 256,
+    num_layers: int = 1,
+    activation: Callable[[jnp.ndarray], jnp.ndarray] = linen.relu,
+    kernel_init: Callable[..., Any] = jax.nn.initializers.lecun_uniform(),
+    layer_norm: bool = False,
+    obs_key: str = "state",
+) -> NeuralNetwork:
+    policy_module = GRUNetwork(
+        hidden_size=hidden_size,
+        num_layers=num_layers,
+        output_size=param_size,
+        activation=activation,
+        kernel_init=kernel_init,
+        layer_norm=layer_norm,
+    )
+
+    def init_fn(key) -> Tuple[Any, jnp.ndarray]:
+        state = jnp.zeros((num_layers, 1, hidden_size))
+        variables = policy_module.init(key, jnp.zeros((1, obs_size)), state)
+        return variables["params"], state
+
+    def apply_fn(
+        processor_params: Any,
+        params: Tuple[Any, jnp.ndarray],
+        state: Any,
+        obs: Any,
+    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        x = preprocess_observations_fn(obs, processor_params)
+
+        st = jnp.transpose(state, (1, 0, 2))
+        logits, state = policy_module.apply({"params": params[0]}, x, st)
+        state = jnp.transpose(state, (1, 0, 2))
+        return logits, state
+
+    return NeuralNetwork(init=init_fn, apply=apply_fn, reccurent=True)

@@ -145,13 +145,25 @@ def compute_ppo_loss(
   data = jax.tree_util.tree_map(lambda x: jnp.swapaxes(x, 0, 1), data)
 
   encoding = encoder_apply(enc_normalizer_params, params.encoder, data.priv)
-  pinput = jnp.concatenate([data.observation, encoding], axis=-1)
-  #encoding = encoding.reshape((encoding.shape[0], -1))
-  #obs = data.observation.reshape((data.observation.shape[0], -1))
+  policy_input = jnp.concatenate([data.observation, encoding], axis=-1)
 
-  policy_logits = policy_apply(normalizer_params, params.policy, pinput)
+  if ppo_network.policy_network.reccurent:
+    def reccurent_policy_step(carry, x_t):
+      logits_t, new_carry = policy_apply(
+          normalizer_params,
+          params.policy,
+          carry,
+          x_t,
+      )
+      return new_carry, logits_t
 
-  baseline = value_apply(normalizer_params, params.value, pinput)
+    _, policy_logits = jax.lax.scan(reccurent_policy_step, data.hidden_state[0], policy_input)
+  else:
+    policy_logits = policy_apply(
+        normalizer_params, params.policy, policy_input
+    )
+
+  baseline = value_apply(normalizer_params, params.value, policy_input)
   terminal_obs = jax.tree_util.tree_map(lambda x: x[-1], data.next_observation)
   next_priv = jax.tree_util.tree_map(lambda x: x[-1], data.next_priv)
 

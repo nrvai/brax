@@ -14,7 +14,7 @@
 
 """Brax training types."""
 
-from typing import Any, Mapping, NamedTuple, Tuple, TypeVar, Union
+from typing import Any, Mapping, NamedTuple, Tuple, TypeVar, Union, Optional
 
 from brax.training.acme.types import NestedArray
 import jax.numpy as jnp
@@ -51,6 +51,7 @@ class Transition(NamedTuple):
   next_observation: NestedArray
   next_priv: NestedArray
   extras: NestedArray = ()  # pytype: disable=annotation-type-mismatch  # jax-ndarray
+  hidden_state: Optional[NestedArray] = None
 
 
 class Policy(Protocol):

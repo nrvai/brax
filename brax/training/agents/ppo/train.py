@@ -27,12 +27,14 @@ from brax.training.agents.ppo import losses as ppo_losses
 from brax.training.agents.ppo import networks as ppo_networks
 from brax.v1 import envs as envs_v1
 
-from brax.training.acting import Evaluator, generate_unroll
+from brax.training.acting import Evaluator, generate_unroll, reccurent_generate_unroll
 from brax.training.hf_wrapper import HeightFieldWrapper
+
 
 @flax.struct.dataclass
 class TrainingState:
     """Contains training state for the learner."""
+
     optimizer_state: optax.OptState
     params: ppo_losses.PPONetworkParams
     normalizer_params: running_statistics.RunningStatisticsState
@@ -68,6 +70,8 @@ def ppo_train(
     progress_fn: Callable = lambda *_: None,
     checkpoint: dict = None,
     curriculum: int = 0,
+    reccurent_policy: bool = False,
+    gru_layers: int = 0,
     **kwargs
 ):
     def init_training_components():
@@ -78,7 +82,8 @@ def ppo_train(
             policy_hidden_layer_sizes=policy_hidden_layer_sizes,
             encoder_hidden_layer_sizes=encoder_hidden_layer_sizes,
             value_hidden_layer_sizes=value_hidden_layer_sizes,
-            preprocess_observations_fn=running_statistics.normalize)
+            preprocess_observations_fn=running_statistics.normalize
+        )
 
         make_policy = ppo_networks.make_inference_fn(ppo_network)
 
@@ -92,7 +97,9 @@ def ppo_train(
             reward_scaling=reward_scaling,
             gae_lambda=gae_lambda,
             clipping_epsilon=clipping_epsilon,
-            normalize_advantage=normalize_advantage)
+            normalize_advantage=normalize_advantage
+        )
+        generate_unroll_fn = reccurent_generate_unroll if reccurent_policy else generate_unroll
 
         if checkpoint:
             policy_params = checkpoint["policy"]
@@ -103,8 +110,12 @@ def ppo_train(
         else:
             policy_params = ppo_network.policy_network.init(key_policy)
             value_params = ppo_network.value_network.init(key_value)
-            normalizer_params = running_statistics.init_state(specs.Array(
-                (state.obs.shape[-1] + encoder_hidden_layer_sizes[-1]), jnp.dtype("float32")))
+            normalizer_params = running_statistics.init_state(
+                specs.Array(
+                    (state.obs.shape[-1] + encoder_hidden_layer_sizes[-1]),
+                    jnp.dtype("float32")
+                )
+            )
             enc_params = ppo_network.encoder_network.init(key_enc)
             enc_normalizer_params = running_statistics.init_state(specs.Array(state.priv.shape[-1:], jnp.dtype("float32")))
 
@@ -121,12 +132,14 @@ def ppo_train(
 
         gradient_update_fn = gradients.gradient_update_fn(loss_fn, optimizer, pmap_axis_name=None, has_aux=True)
 
-        return make_policy, training_state, gradient_update_fn
+        return make_policy, training_state, generate_unroll_fn, gradient_update_fn
 
-    def minibatch_step(carry, data: types.Transition,
-                       normalizer_params: running_statistics.RunningStatisticsState,
-                       enc_normalizer_params: running_statistics.RunningStatisticsState
-                       ):
+    def minibatch_step(
+        carry,
+        data: types.Transition,
+        normalizer_params: running_statistics.RunningStatisticsState,
+        enc_normalizer_params: running_statistics.RunningStatisticsState
+    ):
         optimizer_state, params, key = carry
         key, key_loss = jax.random.split(key)
         (_, metrics), params, optimizer_state = gradient_update_fn(
@@ -140,10 +153,13 @@ def ppo_train(
 
         return (optimizer_state, params, key), metrics
 
-    def sgd_step(carry, _, data: types.Transition,
-                 normalizer_params: running_statistics.RunningStatisticsState,
-                 enc_normalizer_params: running_statistics.RunningStatisticsState
-                 ):
+    def sgd_step(
+        carry,
+        _,
+        data: types.Transition,
+        normalizer_params: running_statistics.RunningStatisticsState,
+        enc_normalizer_params: running_statistics.RunningStatisticsState
+    ):
         optimizer_state, params, key = carry
         key, key_perm, key_grad = jax.random.split(key, 3)
 
@@ -154,7 +170,11 @@ def ppo_train(
 
         shuffled_data = jax.tree_util.tree_map(shuffle, data)
         (optimizer_state, params, _), metrics = jax.lax.scan(
-            functools.partial(minibatch_step, normalizer_params=normalizer_params, enc_normalizer_params=enc_normalizer_params),
+            functools.partial(
+                minibatch_step,
+                normalizer_params=normalizer_params,
+                enc_normalizer_params=enc_normalizer_params
+            ),
             (optimizer_state, params, key_grad),
             shuffled_data,  # [batch, unroll_length, -1]
             length=num_minibatches
@@ -172,18 +192,13 @@ def ppo_train(
         def unroll(carry, _):
             state, key = carry
             key, next_key = jax.random.split(key)
-            next_state, data = generate_unroll(
-                env,
-                state,
-                policy,
-                key,
-                unroll_length,
-                extra_fields=("truncation",)
-            )
+            next_state, data = generate_unroll_fn(env, state, policy, key, unroll_length, extra_fields=("truncation",))
             return (next_state, next_key), data
 
         (state, _), data = jax.lax.scan(
-            unroll, (state, key_generate_unroll), (),
+            unroll,
+            (state, key_generate_unroll),
+            (),
             length=batch_size * num_minibatches // num_envs
         )
 
@@ -199,9 +214,15 @@ def ppo_train(
         enc_normalizer_params = running_statistics.update(training_state.enc_normalizer_params, data.priv)
 
         (optimizer_state, params, _), metrics = jax.lax.scan(
-            functools.partial(sgd_step, data=data, normalizer_params=normalizer_params, enc_normalizer_params=enc_normalizer_params),
-            (training_state.optimizer_state, training_state.params, key_loss), (),
-            length=num_updates_per_batch
+            functools.partial(
+                sgd_step,
+                data=data,
+                normalizer_params=normalizer_params,
+                enc_normalizer_params=enc_normalizer_params
+            ),
+            (training_state.optimizer_state, training_state.params, key_loss),
+            (),
+            length=num_updates_per_batch,
         )
 
         training_state = TrainingState(
@@ -216,7 +237,10 @@ def ppo_train(
 
     def train_epoch(training_state, state, key):
         (training_state, state, key), loss_metrics = jax.lax.scan(
-            training_step, (training_state, state, key), (), length=epoch_training_steps
+            training_step,
+            (training_state, state, key),
+            (),
+            length=epoch_training_steps
         )
         loss_metrics = jax.tree_util.tree_map(jnp.mean, loss_metrics)
         train_metrics = {f"train/{k}": v for k, v in jax.tree_util.tree_map(jnp.mean, state.metrics).items()}
@@ -241,12 +265,30 @@ def ppo_train(
     env_steps_per_training_step = batch_size * unroll_length * num_minibatches * action_repeat
 
     key = jax.random.PRNGKey(seed=seed)
-    key, env_key, key_policy, key_value, key_enc, epoch_key, eval_key, domain_key = jax.random.split(key, 8)
+    (
+        key,
+        env_key,
+        key_policy,
+        key_value,
+        key_enc,
+        epoch_key,
+        eval_key,
+        domain_key,
+    ) = jax.random.split(key, 8)
     key_envs = jax.random.split(env_key, num_envs)
 
     env = wrap_train_env(environment)
     state = env.reset(key_envs)
-    make_policy, training_state, gradient_update_fn = init_training_components()
+
+    if reccurent_policy:
+        hidden_size = policy_hidden_layer_sizes[0]
+        state = state.replace(
+            hidden_state=jnp.broadcast_to(
+                jnp.zeros((1, 1, hidden_size)), (num_envs, gru_layers, hidden_size)
+            )
+        )
+
+    make_policy, training_state, generate_unroll_fn, gradient_update_fn = init_training_components()
 
     current_step = 0
     curriculum = 0
@@ -258,8 +300,10 @@ def ppo_train(
         evaluator = Evaluator(
             wrap_eval_env(environment),
             functools.partial(make_policy, deterministic=deterministic_eval),
-            num_eval_envs=num_eval_envs, episode_length=episode_length,
-            action_repeat=action_repeat, key=eval_key
+            num_eval_envs=num_eval_envs,
+            episode_length=episode_length,
+            action_repeat=action_repeat,
+            key=eval_key
         )
         metrics = evaluator.run_evaluation(params, enc_params, {})
         progress_fn(current_step, metrics, make_policy, training_state, curriculum)
@@ -269,6 +313,7 @@ def ppo_train(
 
         state.info["curriculum"] = jnp.full(num_envs, curriculum)
         (training_state, state, train_metrics) = train_epoch(training_state, state, epoch_key)
+
         current_step = int(training_state.env_steps)
 
         params = (training_state.normalizer_params, training_state.params.policy)
@@ -278,19 +323,19 @@ def ppo_train(
         progress_fn(current_step, metrics, make_policy, training_state, curriculum)
 
         _curr = curriculum
-        if curriculum == 0 and metrics["train/episode_metrics"]["linear"] > 400:
+        if curriculum == 0 and metrics["train/episode_metrics"]["linear"] > 450:
             curriculum = 1
-        elif curriculum == 1 and metrics["train/episode_metrics"]["linear"] > 200:
+        elif curriculum == 1 and metrics["train/episode_metrics"]["linear"] > 450:
             curriculum = 2
-        elif curriculum == 2 and metrics["train/episode_metrics"]["linear"] > 200:
+        elif curriculum == 2 and metrics["train/episode_metrics"]["linear"] > 400:
             curriculum = 3
-        elif curriculum == 3 and metrics["train/episode_metrics"]["linear"] > 200:
+        elif curriculum == 3 and metrics["train/episode_metrics"]["linear"] > 400:
             curriculum = 4
-        elif curriculum == 4 and metrics["train/episode_metrics"]["linear"] > 200:
+        elif curriculum == 4 and metrics["train/episode_metrics"]["linear"] > 400:
             curriculum = 5
-        elif curriculum == 5 and metrics["train/episode_metrics"]["linear"] > 200:
+        elif curriculum == 5 and metrics["train/episode_metrics"]["linear"] > 400:
             curriculum = 6
-        elif metrics["train/episode_metrics"]["linear"] > 200:
+        elif curriculum > 5 and metrics["train/episode_metrics"]["linear"] > 400:
             curriculum += 1
         if _curr != curriculum:
             print(f"curriculum set to {curriculum}")

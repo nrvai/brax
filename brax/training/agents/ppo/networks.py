@@ -27,9 +27,9 @@ import jax.numpy as jp
 
 @flax.struct.dataclass
 class PPONetworks:
-  policy_network: networks.FeedForwardNetwork
-  value_network: networks.FeedForwardNetwork
-  encoder_network: networks.FeedForwardNetwork
+  policy_network: networks.NeuralNetwork
+  value_network: networks.NeuralNetwork
+  encoder_network: networks.NeuralNetwork
   parametric_action_distribution: distribution.ParametricDistribution
 
 
@@ -39,14 +39,44 @@ def make_inference_fn(ppo_networks: PPONetworks):
   def make_policy(
       policy_params: types.Params,
       enc_params: types.Params,
+      reccurent: bool = False,
       deterministic: bool = False
   ) -> types.Policy:
     policy_network = ppo_networks.policy_network
     encoder_network = ppo_networks.encoder_network
     parametric_action_distribution = ppo_networks.parametric_action_distribution
 
+    def reccurent_policy(
+        observations: types.Observation,
+        priv: types.Observation,
+        state,
+        key_sample: PRNGKey
+    ) -> Tuple[types.Action, types.Extra]:
+      encoding = encoder_network.apply(*enc_params, priv)
+
+      pinput = jp.concatenate([observations, encoding], axis=-1)
+      logits, state = policy_network.apply(*policy_params, state, pinput)
+
+      if deterministic:
+        return ppo_networks.parametric_action_distribution.mode(logits), {}
+      raw_actions = parametric_action_distribution.sample_no_postprocessing(
+          logits, key_sample
+      )
+      log_prob = parametric_action_distribution.log_prob(logits, raw_actions)
+      postprocessed_actions = parametric_action_distribution.postprocess(
+          raw_actions
+      )
+      return postprocessed_actions, {
+          'log_prob': log_prob,
+          'raw_action': raw_actions,
+          'encoding': pinput,
+          'hidden_state': state
+      }
+
     def policy(
-        observations: types.Observation, priv: types.Observation, key_sample: PRNGKey
+        observations: types.Observation,
+        priv: types.Observation,
+        key_sample: PRNGKey
     ) -> Tuple[types.Action, types.Extra]:
       encoding = encoder_network.apply(*enc_params, priv)
 
@@ -68,9 +98,10 @@ def make_inference_fn(ppo_networks: PPONetworks):
           'encoding': pinput
       }
 
-    return policy
+    return reccurent_policy if reccurent else policy
 
   return make_policy
+
 
 
 def make_ppo_networks(
@@ -78,6 +109,8 @@ def make_ppo_networks(
     privileged_size: int,
     action_size: int,
     preprocess_observations_fn: types.PreprocessObservationFn = types.identity_observation_preprocessor,
+    reccurent: bool= False,
+    num_gru_layers: int = 0,
     policy_hidden_layer_sizes: Sequence[int] = (32,) * 4,
     value_hidden_layer_sizes: Sequence[int] = (256,) * 5,
     encoder_hidden_layer_sizes: Sequence[int] = (128,) * 3,
@@ -92,14 +125,27 @@ def make_ppo_networks(
   )
   encoder_size = encoder_hidden_layer_sizes[-1]
   full_obs_size = observation_size + encoder_size
-  policy_network = networks.make_policy_network(
+  if reccurent:
+    policy_network = networks.make_recurrent_policy_network(
+        parametric_action_distribution.param_size,
+        full_obs_size,
+        preprocess_observations_fn=preprocess_observations_fn,
+        hidden_size=policy_hidden_layer_sizes[0],
+        num_layers=num_gru_layers,
+        activation=activation,
+        obs_key=policy_obs_key
+    )
+  else:
+    policy_network = networks.make_policy_network(
       parametric_action_distribution.param_size,
       full_obs_size,
       preprocess_observations_fn=preprocess_observations_fn,
       hidden_layer_sizes=policy_hidden_layer_sizes,
       activation=activation,
-      obs_key=policy_obs_key,
-  )
+      obs_key=policy_obs_key
+    )
+
+
   value_network = networks.make_value_network(
       full_obs_size,
       preprocess_observations_fn=preprocess_observations_fn,
