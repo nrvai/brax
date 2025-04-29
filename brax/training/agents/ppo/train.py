@@ -289,6 +289,13 @@ def ppo_train(
         )
 
     make_policy, training_state, generate_unroll_fn, gradient_update_fn = init_training_components()
+    training_spec = {
+        "policy_hidden_layer_sizes": policy_hidden_layer_sizes,
+        "encoder_hidden_layer_sizes": encoder_hidden_layer_sizes,
+        "value_hidden_layer_sizes": value_hidden_layer_sizes,
+        "is_recurrent": reccurent_policy,
+        "gru_layers": gru_layers
+    }
 
     current_step = 0
     curriculum = 0
@@ -320,7 +327,7 @@ def ppo_train(
         enc_params = (training_state.enc_normalizer_params, training_state.params.encoder)
         metrics = evaluator.run_evaluation(params, enc_params, train_metrics) if run_eval else train_metrics
 
-        progress_fn(current_step, metrics, make_policy, training_state, curriculum)
+        progress_fn(current_step, metrics, make_policy, (training_state, training_spec), curriculum)
 
         _curr = curriculum
         if curriculum == 0 and metrics["train/episode_metrics"]["linear"] > 450:

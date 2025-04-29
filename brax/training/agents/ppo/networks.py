@@ -109,7 +109,7 @@ def make_ppo_networks(
     privileged_size: int,
     action_size: int,
     preprocess_observations_fn: types.PreprocessObservationFn = types.identity_observation_preprocessor,
-    reccurent: bool= False,
+    is_reccurent: bool= False,
     num_gru_layers: int = 0,
     policy_hidden_layer_sizes: Sequence[int] = (32,) * 4,
     value_hidden_layer_sizes: Sequence[int] = (256,) * 5,
@@ -125,7 +125,7 @@ def make_ppo_networks(
   )
   encoder_size = encoder_hidden_layer_sizes[-1]
   full_obs_size = observation_size + encoder_size
-  if reccurent:
+  if is_reccurent:
     policy_network = networks.make_recurrent_policy_network(
         parametric_action_distribution.param_size,
         full_obs_size,
