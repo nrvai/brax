@@ -169,8 +169,8 @@ def compute_ppo_loss(
 
   next_encoding = encoder_apply(enc_normalizer_params, params.encoder, next_priv)
 
-  next_pinput = jnp.concatenate([terminal_obs, next_encoding], axis=-1)
-  bootstrap_value = value_apply(normalizer_params, params.value, next_pinput)
+  next_full_encoding = jnp.concatenate([terminal_obs, next_encoding], axis=-1)
+  bootstrap_value = value_apply(normalizer_params, params.value, next_full_encoding)
 
   rewards = data.reward * reward_scaling
   truncation = data.extras['state_extras']['truncation']

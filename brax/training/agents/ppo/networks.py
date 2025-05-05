@@ -33,18 +33,51 @@ class PPONetworks:
   parametric_action_distribution: distribution.ParametricDistribution
 
 
-def make_inference_fn(ppo_networks: PPONetworks):
+def make_inference_fn(ppo_networks: PPONetworks, is_reccurent: bool = False):
   """Creates params and inference function for the PPO agent."""
+
+  policy_network = ppo_networks.policy_network
+  encoder_network = ppo_networks.encoder_network
+  parametric_action_distribution = ppo_networks.parametric_action_distribution
 
   def make_policy(
       policy_params: types.Params,
       enc_params: types.Params,
-      reccurent: bool = False,
       deterministic: bool = False
   ) -> types.Policy:
-    policy_network = ppo_networks.policy_network
-    encoder_network = ppo_networks.encoder_network
-    parametric_action_distribution = ppo_networks.parametric_action_distribution
+
+    def policy(
+        observations: types.Observation,
+        priv: types.Observation,
+        key_sample: PRNGKey
+    ) -> Tuple[types.Action, types.Extra]:
+      encoding = encoder_network.apply(*enc_params, priv)
+
+      full_encoding = jp.concatenate([observations, encoding], axis=-1)
+      logits = policy_network.apply(*policy_params, full_encoding)
+
+      if deterministic:
+        return ppo_networks.parametric_action_distribution.mode(logits), {}
+      raw_actions = parametric_action_distribution.sample_no_postprocessing(
+          logits, key_sample
+      )
+      log_prob = parametric_action_distribution.log_prob(logits, raw_actions)
+      postprocessed_actions = parametric_action_distribution.postprocess(
+          raw_actions
+      )
+      return postprocessed_actions, {
+          'log_prob': log_prob,
+          'raw_action': raw_actions,
+          'encoding': full_encoding
+      }
+
+    return policy
+
+  def make_reccurent_policy(
+      policy_params: types.Params,
+      enc_params: types.Params,
+      deterministic: bool = False
+  ) -> types.Policy:
 
     def reccurent_policy(
         observations: types.Observation,
@@ -54,8 +87,8 @@ def make_inference_fn(ppo_networks: PPONetworks):
     ) -> Tuple[types.Action, types.Extra]:
       encoding = encoder_network.apply(*enc_params, priv)
 
-      pinput = jp.concatenate([observations, encoding], axis=-1)
-      logits, state = policy_network.apply(*policy_params, state, pinput)
+      full_encoding = jp.concatenate([observations, encoding], axis=-1)
+      logits, state = policy_network.apply(*policy_params, state, full_encoding)
 
       if deterministic:
         return ppo_networks.parametric_action_distribution.mode(logits), {}
@@ -69,38 +102,13 @@ def make_inference_fn(ppo_networks: PPONetworks):
       return postprocessed_actions, {
           'log_prob': log_prob,
           'raw_action': raw_actions,
-          'encoding': pinput,
+          'encoding': full_encoding,
           'hidden_state': state
       }
 
-    def policy(
-        observations: types.Observation,
-        priv: types.Observation,
-        key_sample: PRNGKey
-    ) -> Tuple[types.Action, types.Extra]:
-      encoding = encoder_network.apply(*enc_params, priv)
+    return reccurent_policy
 
-      pinput = jp.concatenate([observations, encoding], axis=-1)
-      logits = policy_network.apply(*policy_params, pinput)
-
-      if deterministic:
-        return ppo_networks.parametric_action_distribution.mode(logits), {}
-      raw_actions = parametric_action_distribution.sample_no_postprocessing(
-          logits, key_sample
-      )
-      log_prob = parametric_action_distribution.log_prob(logits, raw_actions)
-      postprocessed_actions = parametric_action_distribution.postprocess(
-          raw_actions
-      )
-      return postprocessed_actions, {
-          'log_prob': log_prob,
-          'raw_action': raw_actions,
-          'encoding': pinput
-      }
-
-    return reccurent_policy if reccurent else policy
-
-  return make_policy
+  return make_reccurent_policy if is_reccurent else make_policy
 
 
 

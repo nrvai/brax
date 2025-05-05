@@ -82,10 +82,12 @@ def ppo_train(
             policy_hidden_layer_sizes=policy_hidden_layer_sizes,
             encoder_hidden_layer_sizes=encoder_hidden_layer_sizes,
             value_hidden_layer_sizes=value_hidden_layer_sizes,
-            preprocess_observations_fn=running_statistics.normalize
+            preprocess_observations_fn=running_statistics.normalize,
+            is_reccurent=reccurent_policy,
+            num_gru_layers=gru_layers
         )
 
-        make_policy = ppo_networks.make_inference_fn(ppo_network)
+        make_policy = ppo_networks.make_inference_fn(ppo_network, is_reccurent=reccurent_policy)
 
         optimizer = optax.adam(learning_rate=learning_rate)
 
@@ -330,19 +332,17 @@ def ppo_train(
         progress_fn(current_step, metrics, make_policy, (training_state, training_spec), curriculum)
 
         _curr = curriculum
-        if curriculum == 0 and metrics["train/episode_metrics"]["linear"] > 450:
+        if curriculum == 0 and metrics["train/linear"] > 0.91:
             curriculum = 1
-        elif curriculum == 1 and metrics["train/episode_metrics"]["linear"] > 450:
+        elif curriculum == 1 and metrics["train/linear"] > 0.9:
             curriculum = 2
-        elif curriculum == 2 and metrics["train/episode_metrics"]["linear"] > 400:
+        elif curriculum == 2 and metrics["train/linear"] > 0.89:
             curriculum = 3
-        elif curriculum == 3 and metrics["train/episode_metrics"]["linear"] > 400:
+        elif curriculum == 3 and metrics["train/linear"] > 0.85:
             curriculum = 4
-        elif curriculum == 4 and metrics["train/episode_metrics"]["linear"] > 400:
+        elif curriculum == 4 and metrics["train/linear"] > 0.85:
             curriculum = 5
-        elif curriculum == 5 and metrics["train/episode_metrics"]["linear"] > 400:
-            curriculum = 6
-        elif curriculum > 5 and metrics["train/episode_metrics"]["linear"] > 400:
+        elif curriculum > 4 and metrics["train/linear"] > 0.82:
             curriculum += 1
         if _curr != curriculum:
             print(f"curriculum set to {curriculum}")
