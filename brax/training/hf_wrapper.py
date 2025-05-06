@@ -1,4 +1,3 @@
-
 import jax
 import jax.numpy as jnp
 from brax.base import State, System
@@ -28,14 +27,17 @@ class HeightFieldWrapper(Wrapper):
 
     def step(self, state: State, action: jax.Array, *args) -> State:
         def get_hf_add(rng, curriculum):
-            fn_rng, rng = jax.random.split(rng)
-            fn_id = jax.random.randint(rng, (1,), 0, 4)[0]
+            add_rng, add_fn_rng, neg_rng, neg_fn_rng = jax.random.split(rng, 4)
+            add_id = jax.random.randint(add_rng, (1,), 0, 2)[0]
+            neg_id = jax.random.randint(neg_rng, (1,), 0, 2)[0]
 
-            hf_add = get_curriculum_slopes(fn_rng, curriculum)
-            hf_add = jax.lax.cond(fn_id == 1, lambda: get_curriculum_stairs(fn_rng, curriculum), lambda: hf_add)
-            hf_add = jax.lax.cond(fn_id == 2, lambda: get_curriculum_holes(fn_rng, curriculum), lambda: hf_add)
-            hf_add = jax.lax.cond(fn_id == 3, lambda: get_curriculum_gutters(fn_rng, curriculum), lambda: hf_add)
-            return hf_add
+            hf_add = get_curriculum_slopes(add_fn_rng, curriculum)
+            hf_add = jax.lax.cond(add_id == 1, lambda: get_curriculum_stairs(add_fn_rng, curriculum), lambda: hf_add)
+
+            hf_neg = get_curriculum_gutters(neg_fn_rng, curriculum + 1)
+            hf_neg = jax.lax.cond(neg_id == 1, lambda: get_curriculum_holes(neg_fn_rng, curriculum + 1), lambda: hf_neg)
+
+            return hf_add + hf_neg
 
         rng, scale_rng, add_rng = jax.random.split(state.info["rng"], 3)
         hf_scale = jax.lax.cond(
